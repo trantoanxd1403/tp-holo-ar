@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Xem AR · TP Holo</title>
+<meta name="robots" content="noindex">
+<style>
+:root{--bg:#0d0e10;--panel:#16181b;--ink:#f2f2f0;--mute:#9a9ea3;--red:#c4262e;--line:#2a2d31}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+body{display:flex;flex-direction:column}
+header{display:flex;align-items:center;gap:12px;padding:max(14px,env(safe-area-inset-top)) 16px 8px}
+header img{width:44px;height:44px}
+header .b{font-weight:800;letter-spacing:.04em;line-height:1.1}
+header .b span{color:var(--red)}
+#title{font-size:22px;font-weight:700;margin:4px 16px 0}
+#view{flex:1;min-height:240px;position:relative}
+#view canvas{width:100%;height:100%;display:block;touch-action:none}
+.panel{padding:12px 16px max(18px,env(safe-area-inset-bottom));display:flex;flex-direction:column;gap:10px}
+#msg{color:var(--mute);font-size:15px}
+button{font:600 17px system-ui,sans-serif;border-radius:999px;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:14px 18px;min-height:52px}
+button.main{background:var(--red);border-color:var(--red);color:#fff}
+button[hidden]{display:none}
+label.pick{color:var(--mute);font-size:14px;text-align:center}
+label.pick input{display:none}
+label.pick u{color:var(--ink)}
+/* lớp nút nổi trên camera khi đang AR */
+#ov{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:space-between;pointer-events:none;padding:max(16px,env(safe-area-inset-top)) 12px max(20px,env(safe-area-inset-bottom))}
+#ov[hidden]{display:none}
+#ovMsg{align-self:center;max-width:440px;background:rgba(13,14,16,.8);border-radius:12px;padding:10px 14px;font-size:15px;text-align:center}
+#ovBar{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;pointer-events:auto}
+#ovBar button{font-size:15px;padding:10px 14px;min-height:46px;background:rgba(13,14,16,.85)}
+#ovBar button.on{background:var(--red);border-color:var(--red)}
+</style>
+<script type="importmap">{"imports":{"three":"./lib/three.module.min.js","three/addons/":"./lib/addons/"}}</script>
+</head>
+<body>
+<header><img src="logo.webp" alt="Thiên Phúc"><div class="b">TP <span>HOLO</span><br><small style="font-weight:500;color:var(--mute);letter-spacing:0">Xem nhà bằng camera</small></div></header>
+<div id="title"></div>
+<div id="view"></div>
+<div class="panel">
+  <div id="msg">Đang nhận mô hình từ file TP Holo…</div>
+  <button type="button" class="main" id="go" hidden>📷 Đặt nhà bằng camera</button>
+  <label class="pick" id="pick" hidden>Hoặc <u>chọn file mô hình .glb</u> trên máy<input type="file" accept=".glb,model/gltf-binary"></label>
+</div>
+<div id="ov" hidden>
+  <div id="ovMsg">Rê điện thoại chậm qua mặt bàn hoặc mặt sàn. Khi thấy vòng tròn, chạm để đặt nhà.</div>
+  <div id="ovBar">
+    <button type="button" data-s="0.01">1:100</button><button type="button" data-s="0.02" class="on">1:50</button><button type="button" data-s="0.05">1:20</button><button type="button" data-s="1">1:1</button>
+    <button type="button" id="rot">⟲ Xoay</button><button type="button" id="exit">Thoát</button>
+  </div>
+</div>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+const $=s=>document.querySelector(s);
+const view=$('#view'),msg=$('#msg'),go=$('#go'),pick=$('#pick');
+const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.outputColorSpace=THREE.SRGBColorSpace;
+view.appendChild(renderer.domElement);
+const scene=new THREE.Scene();
+const camera=new THREE.PerspectiveCamera(40,1,0.01,2000);
+scene.add(new THREE.HemisphereLight(0xffffff,0x5a5a55,1.4));
+const sun=new THREE.DirectionalLight(0xffffff,1.6);sun.position.set(3,6,2);scene.add(sun);
+// bóng mờ dưới chân nhà cho cảm giác nhà đặt thật trên mặt bàn
+const sh=(()=>{const c=document.createElement('canvas');c.width=c.height=128;const g=c.getContext('2d');const r=g.createRadialGradient(64,64,8,64,64,64);r.addColorStop(0,'rgba(0,0,0,.45)');r.addColorStop(1,'rgba(0,0,0,0)');g.fillStyle=r;g.fillRect(0,0,128,128);
+  const m=new THREE.Mesh(new THREE.PlaneGeometry(1,1).rotateX(-Math.PI/2),new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(c),transparent:true,depthWrite:false}));m.renderOrder=-1;return m;})();
+const anchor=new THREE.Group();scene.add(anchor);
+let house=null,size=null,spin=0,inXR=false,scale=0.02,hitSrc=null,free=false,first=false,session=null;
+const reticle=new THREE.Mesh(new THREE.RingGeometry(0.06,0.08,40).rotateX(-Math.PI/2),new THREE.MeshBasicMaterial({color:0xe4c68f}));
+reticle.matrixAutoUpdate=false;reticle.visible=false;scene.add(reticle);
+
+function fit(){const w=view.clientWidth,h=view.clientHeight;if(inXR)return;renderer.setSize(w,h,false);camera.aspect=w/h;camera.updateProjectionMatrix();}
+addEventListener('resize',fit);
+function useModel(buf,title){
+  if(title){$('#title').textContent=title;document.title=title+' · Xem AR';}
+  msg.textContent='Đang mở mô hình…';
+  new GLTFLoader().parse(buf,'',g=>{
+    if(house){anchor.remove(house);}
+    house=g.scene;const B=new THREE.Box3().setFromObject(house);size=B.getSize(new THREE.Vector3());
+    house.position.set(-(B.min.x+B.max.x)/2,-B.min.y,-(B.min.z+B.max.z)/2);   // chân nhà ở gốc
+    const holder=new THREE.Group();holder.add(house);house=holder;anchor.add(house);
+    sh.scale.set(size.x*1.4,1,size.z*1.4);house.add(sh);
+    anchor.scale.setScalar(1);
+    const r=Math.max(size.x,size.y,size.z);camera.position.set(r*1.5,r*1.0,r*1.8);camera.lookAt(0,size.y*0.35,0);
+    fit();msg.textContent='Bấm nút bên dưới, cho phép dùng camera, rồi rê máy qua mặt bàn hoặc mặt sàn.';
+    checkXR();
+  },e=>{console.error(e);msg.textContent='Không mở được mô hình: '+(e.message||e);});
+}
+async function checkXR(){
+  let ok=false;try{ok=!!(navigator.xr&&await navigator.xr.isSessionSupported('immersive-ar'));}catch(e){}
+  go.hidden=!ok;
+  if(!ok)msg.textContent=/iPhone|iPad|iPod/i.test(navigator.userAgent)?'iPhone/iPad: hãy dùng nút Xem AR ngay trong file TP Holo (mở bằng Safari).':'Máy này chưa mở được AR. Cần Chrome mới và ứng dụng "Google Play Services for AR" (cài hoặc cập nhật trong CH Play), rồi mở lại.';
+}
+// nhận mô hình từ file TP Holo đang mở trên máy (gửi thẳng trong điện thoại, không qua mạng)
+addEventListener('message',e=>{const d=e.data;if(!d||d.tp!=='model'||!(d.glb instanceof ArrayBuffer))return;got=true;useModel(d.glb,d.title||'');});
+let got=false,tries=0;
+(function hello(){if(got)return;if(window.opener){try{window.opener.postMessage({tp:'ready'},'*');}catch(e){}}
+  if(++tries===12&&!got){msg.textContent=window.opener?'Chưa nhận được mô hình. Quay lại file TP Holo và bấm Mở AR lần nữa.':'Mở trang này bằng nút 📱 Xem AR trong file TP Holo.';pick.hidden=false;}
+  setTimeout(hello,500);})();
+pick.querySelector('input').onchange=async e=>{const f=e.target.files[0];if(f){got=true;useModel(await f.arrayBuffer(),f.name.replace(/\.glb$/i,''));}};
+
+// xem trước 3D xoay chậm
+renderer.setAnimationLoop(()=>{if(inXR)return;if(house){spin+=0.004;anchor.rotation.y=spin;}renderer.render(scene,camera);});
+
+const ov=$('#ov'),ovMsg=$('#ovMsg');
+ov.querySelector('#ovBar').addEventListener('beforexrselect',e=>e.preventDefault());
+ov.querySelectorAll('[data-s]').forEach(b=>b.onclick=ev=>{ev.stopPropagation();scale=+b.dataset.s;ov.querySelectorAll('[data-s]').forEach(x=>x.classList.toggle('on',x===b));anchor.scale.setScalar(scale);});
+$('#rot').onclick=ev=>{ev.stopPropagation();anchor.rotation.y+=Math.PI/12;};
+$('#exit').onclick=ev=>{ev.stopPropagation();session&&session.end();};
+go.onclick=async()=>{
+  if(!house||inXR)return;
+  const CFG=[{requiredFeatures:['hit-test'],optionalFeatures:['dom-overlay'],domOverlay:{root:ov}},{optionalFeatures:['hit-test','dom-overlay'],domOverlay:{root:ov}},{}];let err=null;session=null;
+  ov.hidden=false;
+  for(const c of CFG){try{session=await navigator.xr.requestSession('immersive-ar',c);break;}catch(e){err=e;}}
+  if(!session){ov.hidden=true;msg.textContent='Máy chưa mở được AR: '+((err&&err.message)||err);return;}
+  inXR=true;anchor.visible=false;anchor.rotation.y=0;anchor.scale.setScalar(scale);
+  renderer.xr.enabled=true;renderer.xr.setReferenceSpaceType('local');await renderer.xr.setSession(session);
+  hitSrc=null;try{const v=await session.requestReferenceSpace('viewer');hitSrc=await session.requestHitTestSource({space:v});}catch(e){}
+  free=!hitSrc;first=free;
+  if(free)ovMsg.textContent='Máy không dò được mặt bàn: nhà đặt trước mặt. Chạm màn hình để đặt lại.';
+  const front=()=>{const cam=renderer.xr.getCamera();const p=new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);const d=new THREE.Vector3(0,0,-1).applyQuaternion(new THREE.Quaternion().setFromRotationMatrix(cam.matrixWorld));d.y=0;if(d.lengthSq()<1e-4)d.set(0,0,-1);d.normalize();
+    anchor.position.copy(p).addScaledVector(d,1.5);anchor.position.y=p.y-1.2;anchor.visible=true;};
+  session.addEventListener('select',()=>{if(free){front();return;}if(!reticle.visible)return;anchor.position.setFromMatrixPosition(reticle.matrix);anchor.visible=true;ovMsg.textContent='Đổi tỉ lệ, xoay bằng các nút bên dưới. Chạm chỗ khác để dời nhà.';});
+  session.addEventListener('end',()=>{inXR=false;renderer.xr.enabled=false;hitSrc=null;session=null;ov.hidden=true;reticle.visible=false;anchor.visible=true;anchor.position.set(0,0,0);anchor.scale.setScalar(1);fit();
+    ovMsg.textContent='Rê điện thoại chậm qua mặt bàn hoặc mặt sàn. Khi thấy vòng tròn, chạm để đặt nhà.';});
+  renderer.setAnimationLoop((t,fr)=>{
+    if(!inXR){if(house){spin+=0.004;anchor.rotation.y=spin;}renderer.render(scene,camera);return;}
+    if(first&&fr){first=false;front();}
+    if(fr&&hitSrc){const hs=fr.getHitTestResults(hitSrc);if(hs.length){const pose=hs[0].getPose(renderer.xr.getReferenceSpace());reticle.visible=true;reticle.matrix.fromArray(pose.transform.matrix);}else reticle.visible=false;}
+    renderer.render(scene,camera);});
+};
+fit();
+</script>
+</body>
+</html>
