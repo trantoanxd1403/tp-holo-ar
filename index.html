@@ -28,8 +28,9 @@ label.pick u{color:var(--ink)}
 /* lớp nút nổi trên camera khi đang AR */
 #ov{position:fixed;inset:0;display:flex;flex-direction:column;justify-content:space-between;pointer-events:none;padding:max(16px,env(safe-area-inset-top)) 12px max(20px,env(safe-area-inset-bottom))}
 #ov[hidden]{display:none}
-#ovMsg{align-self:center;max-width:440px;background:rgba(13,14,16,.8);border-radius:12px;padding:10px 14px;font-size:15px;text-align:center}
-#ovBar{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;pointer-events:auto}
+#gest{position:fixed;inset:0;pointer-events:auto;touch-action:none}
+#ovMsg{position:relative;align-self:center;max-width:440px;background:rgba(13,14,16,.8);border-radius:12px;padding:10px 14px;font-size:15px;text-align:center}
+#ovBar{position:relative;display:flex;gap:8px;justify-content:center;flex-wrap:wrap;pointer-events:auto}
 #ovBar button{font-size:15px;padding:10px 14px;min-height:46px;background:rgba(13,14,16,.85)}
 #ovBar button.on{background:var(--red);border-color:var(--red)}
 </style>
@@ -45,6 +46,7 @@ label.pick u{color:var(--ink)}
   <label class="pick" id="pick" hidden>Hoặc <u>chọn file mô hình .glb</u> trên máy<input type="file" accept=".glb,model/gltf-binary"></label>
 </div>
 <div id="ov" hidden>
+  <div id="gest"></div>
   <div id="ovMsg">Rê điện thoại chậm qua mặt bàn hoặc mặt sàn. Khi thấy vòng tròn, chạm để đặt nhà.</div>
   <div id="ovBar">
     <button type="button" data-s="0.01">1:100</button><button type="button" data-s="0.02" class="on">1:50</button><button type="button" data-s="0.05">1:20</button><button type="button" data-s="1">1:1</button>
@@ -104,7 +106,16 @@ pick.querySelector('input').onchange=async e=>{const f=e.target.files[0];if(f){g
 // xem trước 3D xoay chậm
 renderer.setAnimationLoop(()=>{if(inXR)return;if(house){spin+=0.004;anchor.rotation.y=spin;}renderer.render(scene,camera);});
 
-const ov=$('#ov'),ovMsg=$('#ovMsg');
+const ov=$('#ov'),ovMsg=$('#ovMsg'),gest=$('#gest');
+// hai ngón: kéo ra/vào để phóng to/thu nhỏ, xoay hai ngón để xoay nhà; một ngón chạm vẫn là đặt nhà
+let G=null,lastG=0;
+const two=e=>{const[a,b]=e.touches;return{d:Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY),a:Math.atan2(b.clientY-a.clientY,b.clientX-a.clientX)};};
+const ratio=()=>{const n=Math.round(1/scale);ovMsg.textContent=scale>=0.95?'Tỉ lệ thật 1:1':'Tỉ lệ khoảng 1:'+n;};
+gest.addEventListener('beforexrselect',e=>{if(G||Date.now()-lastG<600)e.preventDefault();});
+gest.addEventListener('touchstart',e=>{if(e.touches.length===2){const t=two(e);G={d:t.d,a:t.a,s:scale,r:anchor.rotation.y};lastG=Date.now();}},{passive:true});
+gest.addEventListener('touchmove',e=>{if(!G||e.touches.length!==2)return;const t=two(e);scale=Math.min(1.5,Math.max(0.004,G.s*t.d/G.d));anchor.scale.setScalar(scale);anchor.rotation.y=G.r-(t.a-G.a);lastG=Date.now();
+  ov.querySelectorAll('[data-s]').forEach(x=>x.classList.toggle('on',Math.abs(+x.dataset.s-scale)<1e-3));ratio();},{passive:true});
+gest.addEventListener('touchend',e=>{if(G&&e.touches.length<2){G=null;lastG=Date.now();}},{passive:true});
 ov.querySelector('#ovBar').addEventListener('beforexrselect',e=>e.preventDefault());
 ov.querySelectorAll('[data-s]').forEach(b=>b.onclick=ev=>{ev.stopPropagation();scale=+b.dataset.s;ov.querySelectorAll('[data-s]').forEach(x=>x.classList.toggle('on',x===b));anchor.scale.setScalar(scale);});
 $('#rot').onclick=ev=>{ev.stopPropagation();anchor.rotation.y+=Math.PI/12;};
@@ -119,10 +130,10 @@ go.onclick=async()=>{
   renderer.xr.enabled=true;renderer.xr.setReferenceSpaceType('local');await renderer.xr.setSession(session);
   hitSrc=null;try{const v=await session.requestReferenceSpace('viewer');hitSrc=await session.requestHitTestSource({space:v});}catch(e){}
   free=!hitSrc;first=free;
-  if(free)ovMsg.textContent='Máy không dò được mặt bàn: nhà đặt trước mặt. Chạm màn hình để đặt lại.';
+  if(free)ovMsg.textContent='Máy không dò được mặt bàn: nhà đặt trước mặt. Chạm để đặt lại, hai ngón để phóng to hoặc xoay.';
   const front=()=>{const cam=renderer.xr.getCamera();const p=new THREE.Vector3().setFromMatrixPosition(cam.matrixWorld);const d=new THREE.Vector3(0,0,-1).applyQuaternion(new THREE.Quaternion().setFromRotationMatrix(cam.matrixWorld));d.y=0;if(d.lengthSq()<1e-4)d.set(0,0,-1);d.normalize();
     anchor.position.copy(p).addScaledVector(d,1.5);anchor.position.y=p.y-1.2;anchor.visible=true;};
-  session.addEventListener('select',()=>{if(free){front();return;}if(!reticle.visible)return;anchor.position.setFromMatrixPosition(reticle.matrix);anchor.visible=true;ovMsg.textContent='Đổi tỉ lệ, xoay bằng các nút bên dưới. Chạm chỗ khác để dời nhà.';});
+  session.addEventListener('select',()=>{if(G||Date.now()-lastG<600)return;if(free){front();return;}if(!reticle.visible)return;anchor.position.setFromMatrixPosition(reticle.matrix);anchor.visible=true;ovMsg.textContent='Hai ngón kéo ra để phóng to, xoay hai ngón để xoay nhà. Chạm chỗ khác để dời nhà.';});
   session.addEventListener('end',()=>{inXR=false;renderer.xr.enabled=false;hitSrc=null;session=null;ov.hidden=true;reticle.visible=false;anchor.visible=true;anchor.position.set(0,0,0);anchor.scale.setScalar(1);fit();
     ovMsg.textContent='Rê điện thoại chậm qua mặt bàn hoặc mặt sàn. Khi thấy vòng tròn, chạm để đặt nhà.';});
   renderer.setAnimationLoop((t,fr)=>{
